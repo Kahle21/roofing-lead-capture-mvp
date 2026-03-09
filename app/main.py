@@ -27,11 +27,8 @@ async def voice_incoming(
     From: str = Form(...),
     To: str = Form(...),
 ):
-    form_data = {
-        "CallSid": CallSid,
-        "From": From,
-        "To": To,
-    }
+    full_form = await request.form()
+    form_data = dict(full_form)
 
     if not validate_twilio_request(request, form_data):
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
@@ -70,11 +67,8 @@ async def voice_dial_status(
     CallSid: str = Form(...),
     From: str = Form(...),
 ):
-    form_data = {
-        "DialCallStatus": DialCallStatus or "",
-        "CallSid": CallSid,
-        "From": From,
-    }
+    full_form = await request.form()
+    form_data = dict(full_form)
 
     if not validate_twilio_request(request, form_data):
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
@@ -148,17 +142,13 @@ async def sms_incoming(
     To: str = Form(...),
     Body: str = Form(...),
 ):
-    form_data = {
-        "From": From,
-        "To": To,
-        "Body": Body,
-    }
+    full_form = await request.form()
+    form_data = dict(full_form)
 
     if not validate_twilio_request(request, form_data):
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     caller_phone = normalize_phone_number(From)
-    _twilio_number = normalize_phone_number(To)
     owner_phone = normalize_phone_number(settings.OWNER_PHONE)
 
     text = Body.strip()
