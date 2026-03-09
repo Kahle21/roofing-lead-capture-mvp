@@ -1,10 +1,15 @@
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Request, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
+from xml.sax.saxutils import escape
 
 from app.config import settings
 from app.db import supabase
-from app.twilio_helpers import send_sms
+from app.twilio_helpers import (
+    send_sms,
+    normalize_phone_number,
+    validate_twilio_request,
+)
 
 app = FastAPI()
 templates = Jinja2Templates(directory="app/templates")
@@ -17,27 +22,41 @@ def health():
 
 @app.post("/voice/incoming")
 async def voice_incoming(
+    request: Request,
     CallSid: str = Form(...),
     From: str = Form(...),
-    To: str = Form(...)
+    To: str = Form(...),
 ):
+    form_data = {
+        "CallSid": CallSid,
+        "From": From,
+        "To": To,
+    }
+
+    if not validate_twilio_request(request, form_data):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    caller_phone = normalize_phone_number(From)
+    twilio_number = normalize_phone_number(To)
+    owner_phone = normalize_phone_number(settings.OWNER_PHONE)
+
     supabase.table("leads").upsert(
         {
             "call_sid": CallSid,
-            "caller_phone": From,
-            "twilio_number": To,
-            "owner_phone": settings.OWNER_PHONE,
+            "caller_phone": caller_phone,
+            "twilio_number": twilio_number,
+            "owner_phone": owner_phone,
             "business_name": settings.BUSINESS_NAME,
             "call_status": "incoming",
             "source": "voice",
         },
-        on_conflict="call_sid"
+        on_conflict="call_sid",
     ).execute()
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Dial timeout="20" action="{settings.BASE_URL}/voice/dial-status" method="POST">
-        <Number>{settings.OWNER_PHONE}</Number>
+        <Number>{owner_phone}</Number>
     </Dial>
 </Response>"""
 
@@ -46,12 +65,35 @@ async def voice_incoming(
 
 @app.post("/voice/dial-status")
 async def voice_dial_status(
+    request: Request,
     DialCallStatus: str = Form(None),
     CallSid: str = Form(...),
-    From: str = Form(...)
+    From: str = Form(...),
 ):
+    form_data = {
+        "DialCallStatus": DialCallStatus or "",
+        "CallSid": CallSid,
+        "From": From,
+    }
+
+    if not validate_twilio_request(request, form_data):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    caller_phone = normalize_phone_number(From)
+    owner_phone = normalize_phone_number(settings.OWNER_PHONE)
+
     missed_statuses = {"no-answer", "busy", "failed", "canceled"}
     was_missed = DialCallStatus in missed_statuses
+
+    lead_result = (
+        supabase.table("leads")
+        .select("*")
+        .eq("call_sid", CallSid)
+        .limit(1)
+        .execute()
+    )
+
+    lead = lead_result.data[0] if lead_result.data else None
 
     supabase.table("leads").update(
         {
@@ -60,20 +102,31 @@ async def voice_dial_status(
         }
     ).eq("call_sid", CallSid).execute()
 
-    if was_missed:
-        caller_text = (
-            f"Hi, this is {settings.BUSINESS_NAME}. "
-            "Sorry we missed your call. What do you need help with today?"
-        )
-        owner_text = f"Missed call from {From}. Intake text sent."
+    if was_missed and lead:
+        if not lead.get("missed_sms_sent"):
+            caller_text = (
+                f"Hi, this is {settings.BUSINESS_NAME}. "
+                "Sorry we missed your call. What do you need help with today?"
+            )
+            send_sms(caller_phone, caller_text)
 
-        send_sms(From, caller_text)
-        send_sms(settings.OWNER_PHONE, owner_text)
+            supabase.table("leads").update(
+                {"missed_sms_sent": True}
+            ).eq("call_sid", CallSid).execute()
 
+        if not lead.get("owner_alert_sent"):
+            owner_text = f"Missed call from {caller_phone}. Intake text sent."
+            send_sms(owner_phone, owner_text)
+
+            supabase.table("leads").update(
+                {"owner_alert_sent": True}
+            ).eq("call_sid", CallSid).execute()
+
+        spoken_name = escape(settings.BUSINESS_NAME)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">
-        Sorry we missed your call to {settings.BUSINESS_NAME}. We have sent you a text message to collect your details.
+        Sorry we missed your call to {spoken_name}. We have sent you a text message to collect your details.
     </Say>
     <Hangup />
 </Response>"""
@@ -90,16 +143,30 @@ async def voice_dial_status(
 
 @app.post("/sms/incoming")
 async def sms_incoming(
+    request: Request,
     From: str = Form(...),
     To: str = Form(...),
-    Body: str = Form(...)
+    Body: str = Form(...),
 ):
+    form_data = {
+        "From": From,
+        "To": To,
+        "Body": Body,
+    }
+
+    if not validate_twilio_request(request, form_data):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    caller_phone = normalize_phone_number(From)
+    _twilio_number = normalize_phone_number(To)
+    owner_phone = normalize_phone_number(settings.OWNER_PHONE)
+
     text = Body.strip()
 
     result = (
         supabase.table("leads")
         .select("*")
-        .eq("caller_phone", From)
+        .eq("caller_phone", caller_phone)
         .order("created_at", desc=True)
         .limit(1)
         .execute()
@@ -137,7 +204,7 @@ async def sms_incoming(
 
         summary = (
             f"New {settings.BUSINESS_NAME} lead\n\n"
-            f"Phone: {lead['caller_phone']}\n"
+            f"Phone: {caller_phone}\n"
             f"Name: {text}\n"
             f"Service: {lead.get('service_needed') or ''}\n"
             f"Urgency: {lead.get('urgency') or ''}\n"
@@ -152,7 +219,7 @@ async def sms_incoming(
         )
 
         if not lead.get("summary_sent"):
-            send_sms(settings.OWNER_PHONE, summary)
+            send_sms(owner_phone, summary)
 
     elif stage == "complete":
         reply = (
@@ -174,12 +241,15 @@ async def sms_incoming(
             .execute()
         )
 
+    safe_reply = escape(reply)
+
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>{reply}</Message>
+    <Message>{safe_reply}</Message>
 </Response>"""
 
     return Response(content=twiml, media_type="application/xml")
+
 
 @app.get("/leads", response_class=HTMLResponse)
 def leads_page(request: Request):
@@ -193,5 +263,5 @@ def leads_page(request: Request):
 
     return templates.TemplateResponse(
         "leads.html",
-        {"request": request, "leads": result.data}
+        {"request": request, "leads": result.data},
     )
