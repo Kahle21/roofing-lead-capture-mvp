@@ -120,7 +120,7 @@ async def voice_dial_status(
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="alice">
-        Sorry we missed your call to {spoken_name}. We have sent you a text message to collect your details.
+        Sorry we missed your call to {spoken_name}. We’ve sent you a quick text so you can tell us what you need help with, and our team can follow up.
     </Say>
     <Hangup />
 </Response>"""
