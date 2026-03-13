@@ -52,7 +52,7 @@ async def voice_incoming(
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Dial timeout="20" action="{settings.BASE_URL}/voice/dial-status" method="POST">
+    <Dial timeout="10" action="{settings.BASE_URL}/voice/dial-status" method="POST">
         <Number>{owner_phone}</Number>
     </Dial>
 </Response>"""
@@ -119,7 +119,7 @@ async def voice_dial_status(
         spoken_name = escape(settings.BUSINESS_NAME)
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice">
+    <Say voice="Google.en-US-Chirp3-HD-Aoede">
         Sorry we missed your call to {spoken_name}. We’ve sent you a quick text so you can tell us what you need help with, and our team can follow up.
     </Say>
     <Hangup />
